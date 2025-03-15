@@ -209,5 +209,6 @@ pyrightconfig.json
 
 ## source
 bert/lightning_logs
+lightning_logs
 
 # End of https://www.toptal.com/developers/gitignore/api/linux,python,visualstudiocode
