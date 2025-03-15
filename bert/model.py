@@ -1,6 +1,6 @@
 import pandas as pd
 
-from transformers import AdamW
+from transformers import BertModel, AdamW
 import pytorch_lightning as pl
 from torch import nn
 import torch
@@ -13,7 +13,7 @@ import evaluate
 f1_score_metric = evaluate.load("f1")
 
 
-def read_csv(path="result-base.csv"):
+def read_csv(path="./resource/result-base.csv"):
     return pd.read_csv(path)
 
 
@@ -33,6 +33,9 @@ class Model(pl.LightningModule):
         self.num_labels = num_labels
 
         self.model = BERT(bert_config)
+        self.hg_model = BertModel.from_pretrained(model_name)
+
+        self.model.copy_weights_from_huggingface(self.hg_model)
         self.fc = nn.Linear(self.bert_config.d_model, self.bert_config.d_model * 4)
         self.classifier = nn.Linear(self.bert_config.d_model * 4, num_labels)
 
@@ -122,7 +125,7 @@ class Model(pl.LightningModule):
 
     def on_test_epoch_end(self):
         metrics = self.compute_metrics(
-            self.pred_labels.tolist(), self.target_label.tolist()
+            self.pred_labels.tolist(), self.target_labels.tolist()
         )
 
         idx2label = {v: k for k, v in YnatDataset.label2idx.items()}

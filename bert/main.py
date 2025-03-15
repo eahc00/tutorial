@@ -9,7 +9,7 @@ from pytorch_lightning.callbacks import EarlyStopping
 
 max_length = 512
 learning_rate = 2e-5
-max_epoch = 5
+max_epoch = 10
 batch_size = 8
 model_name = "bert-base-multilingual-cased"
 gpu_id = "0,"

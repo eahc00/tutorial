@@ -6,7 +6,7 @@ from transformers import BertTokenizer
 import json
 
 
-def load_json(file_path="./ynat-v1.1/ynat-v1.1_train.json"):
+def load_json(file_path="/home/eahc00/tutorial/bert/ynat-v1.1/ynat-v1.1_train.json"):
     with open(file_path, "r") as file:
         data_json = json.load(file)
 
@@ -62,7 +62,7 @@ class YnatDataloader(pl.LightningDataModule):
 
     def setup(self, stage="fit"):
         ynat_dataset = load_json()
-        ynat_test = load_json("./ynat-v1.1/ynat-v1.1_dev.json")
+        ynat_test = load_json("/home/eahc00/tutorial/bert/ynat-v1.1/ynat-v1.1_dev.json")
         full_dataset = YnatDataset(ynat_dataset, self.tokenizer, self.max_length)
 
         train_size = int(len(ynat_dataset) * 0.8)
