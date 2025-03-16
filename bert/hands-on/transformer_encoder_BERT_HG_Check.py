@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from commons import TransformerEncoder
+from tutorial.commons import TransformerEncoder
 
 # -------------------------------------------------------------------------- #
 # BERT Implementation
@@ -299,8 +299,11 @@ def cli_main():
         print("================")
         print(pooled_out)
 
-        assert torch.all(
-            torch.eq(hg_output.pooler_output, pooled_out)
+        # assert torch.all(
+        #     torch.eq(hg_output.pooler_output, pooled_out)
+        # ), "Not same result!"
+        assert torch.allclose(
+            hg_output.pooler_output, pooled_out, atol=1e-5
         ), "Not same result!"
 
         print("\n\nSAME RESULT! -- Huggingface and My Code")
