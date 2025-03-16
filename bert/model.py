@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 from torch import nn
 import torch
 
-from commons import BERT
+from tutorial.commons import BERT
 from dataset import YnatDataset
 
 import evaluate

@@ -1,4 +1,4 @@
-from commons import BERT_CONFIG
+from tutorial.commons import BERT_CONFIG
 
 from dataset import YnatDataset, YnatDataloader
 from model import Model
