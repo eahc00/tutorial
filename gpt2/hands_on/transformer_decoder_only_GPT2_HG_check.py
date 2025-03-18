@@ -292,9 +292,6 @@ def cp_gpt2_transformer_block_weights(src, tar):
     return tar
 
 
-from pytorch_lightning.callbacks import EarlyStopping
-
-
 def cli_main():
     # ------------ GPT2 model --------------
     from transformers import GPT2Model, GPT2LMHeadModel

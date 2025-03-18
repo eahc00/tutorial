@@ -2,20 +2,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import copy
 import math
+import copy
 
 from tutorial.commons import clones
 
 
-class Conv1D(nn.Moduls):
+class Conv1D(nn.Module):
     def __init__(self, nx, nf):
         super().__init__()
         self.nf = nf
         w = torch.empty(nx, nf)
         nn.init.normal_(w, std=0.02)
         self.weight = nn.Parameter(w)
-        self.biias = nn.Parameter(torch.zeros(nf))
+        self.bias = nn.Parameter(torch.zeros(nf))
 
     def forward(self, x):
         # [B, S, dim_x] -> [B, S, dim_nf]
@@ -28,7 +28,7 @@ class Conv1D(nn.Moduls):
 
 def gelu_new(x):
     return (
-        0.05
+        0.5
         * x
         * (
             1.0
@@ -135,7 +135,7 @@ class GPT2_TransformerBlock(nn.Module):
         x = x + a
 
         # 2) layernorm and MLP
-        m = self.mlp(self.ln_2)
+        m = self.mlp(self.ln_2(x))
         x = x + m
 
         return x, attn_scores
@@ -215,7 +215,9 @@ class GPT2(nn.Module):
 
     def forward(self, input_ids):
         B, seq_len = input_ids.size()
-        assert seq_len <= self.max_seq_len, "Input sequence length exceed model's maximum input length"
+        assert (
+            seq_len <= self.max_seq_len
+        ), "Input sequence length exceed model's maximum input length"
 
         # ---- INPUT (EMBEDDING) PART -----
         token_embeddings = self.wte(input_ids)
@@ -225,105 +227,66 @@ class GPT2(nn.Module):
         x = self.emb_dropout(token_embeddings + position_embeddings)
 
         # ---- Transformer PART ------
-        lookahead_mask = self.look_ahead_mask(seq_len).to(x.device) # mask : head compatible form.
-        x, layer_attn_scores = self.blocks(x, look_ahead_mask = lookahead_mask)
-        x = self.ln_f # <- layer norm on the final tranformer block
+        lookahead_mask = self.look_ahead_mask(seq_len).to(
+            x.device
+        )  # mask : head compatible form.
+        x, layer_attn_scores = self.blocks(x, look_ahead_mask=lookahead_mask)
+        x = self.ln_f(x)  # <- layer norm on the final tranformer block
 
         # --- OUTPUT PART -------------
         logits = self.head(x)
 
         return logits
-    
-    def look_ahead_mask(self, tgt_len:int) -> torch.FloatTensor:
+
+    def look_ahead_mask(self, tgt_len: int) -> torch.FloatTensor:
         mask = torch.triu(torch.ones(tgt_len, tgt_len, dtype=torch.int), diagonal=1)
-        mask = 1 - mask # reverse
+        mask = 1 - mask  # reverse
         return mask
-    
-def cp_weight(src, tar, copy_bias=True, include_eps=False):
-    assert tar.weight.size() == src.weight.size(), "Not compatible parameter size"
-    tar.load_state_dict(src.state_dict())
 
-    if include_eps:
-        # in case of LayerNorm
-        with torch.no_grad():
-            tar.eps = src.eps
+    def cp_weight(self, src, tar, copy_bias=True, include_eps=False):
+        assert tar.weight.size() == src.weight.size(), "Not compatible parameter size"
+        tar.load_state_dict(src.state_dict())
 
+        if include_eps:
+            # in case of LayerNorm
+            with torch.no_grad():
+                tar.eps = src.eps
 
-def cp_gpt2_transformer_block_weights(src, tar):
-    ## src: huggingface GPT2 - Transformer model
-    ## tar: my GPT2 -model- core weights
+    def cp_gpt2_transformer_block_weights(self, src, tar):
+        ## src: huggingface GPT2 - Transformer model
+        ## tar: my GPT2 -model- core weights
 
-    ## layer normalization at top transformer block
-    cp_weight(src.transformer.ln_f, tar.ln_f, include_eps=True)
+        ## layer normalization at top transformer block
+        self.cp_weight(src.transformer.ln_f, tar.ln_f, include_eps=True)
 
-    ## layer weight
-    for layer_num, src_block in enumerate(src.transformer.h):
-        # <<< MultiHeadAttention (Conv1D's parameters) >>>
-        cp_weight(src_block.attn.c_attn, tar.blocks.layers[layer_num].attn.c_attn) # c_attn
-        cp_weight(src_block.attn.c_proj, tar.blocks.layers[layer_num].attn.c_proj) # c_proj
+        ## layer weight
+        for layer_num, src_block in enumerate(src.transformer.h):
+            # <<< MultiHeadAttention (Conv1D's parameters) >>>
+            self.cp_weight(
+                src_block.attn.c_attn, tar.blocks.layers[layer_num].attn.c_attn
+            )  # c_attn
+            self.cp_weight(
+                src_block.attn.c_proj, tar.blocks.layers[layer_num].attn.c_proj
+            )  # c_proj
 
-        # same dropout for attention, residual and others
-        # tar.blocks.layers[layer_num].attn.dropout.load_state_dict(src_block.attn_dropout)
+            # same dropout for attention, residual and others
+            # tar.blocks.layers[layer_num].attn.dropout.load_state_dict(src_block.attn_dropout)
 
-        # <<< MLP >>>
-        cp_weight(src_block.mlp.c_fc, tar.blocks.layer[layer_num].mlp.c_fc) # c_fc
-        cp_weight(src_block.mlp.c_proj, tar.blocks.layer[layer_num].mlp.c_proj) # c_proj
-        # tar.blocks.layers[layer_num],mlp.dropout.load_state_dict(src_block.mlp.dropout) # dropout
+            # <<< MLP >>>
+            self.cp_weight(
+                src_block.mlp.c_fc, tar.blocks.layers[layer_num].mlp.c_fc
+            )  # c_fc
+            self.cp_weight(
+                src_block.mlp.c_proj, tar.blocks.layers[layer_num].mlp.c_proj
+            )  # c_proj
+            # tar.blocks.layers[layer_num],mlp.dropout.load_state_dict(src_block.mlp.dropout) # dropout
 
-        # layer normalization parameters
-        cp_weight(src_block.ln_1, tar.block.layers[layer_num].ln_1, include_eps=True) # ln_1
-        cp_weight(src_block.ln_2, tar.block.layers[layer_num].ln_2, include_eps=True) # ln_2
+            # layer normalization parameters
+            self.cp_weight(
+                src_block.ln_1, tar.blocks.layers[layer_num].ln_1, include_eps=True
+            )  # ln_1
+            self.cp_weight(
+                src_block.ln_2, tar.blocks.layers[layer_num].ln_2, include_eps=True
+            )  # ln_2
 
-    return tar
-
-from pytorch_lightning.callbacks import EarlyStopping
-def cli_main():
-    # ------------ GPT2 model -------------- 
-    from transformers import GPT2Model, GPT2LMHeadModel
-    from transformers import GPT2Tokenizer
-
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    inputs = tokenizer("Hello, my dog is cute", return_tensor="pt")
-
-    # huggingface model
-    hg_model = GPT2LMHeadModel.from_pretrained("gpt2")
-
-    my_model = GPT2(
-        vocab_size=hg_model.config.vocab_size,
-        num_layers=hg_model.config.n_layer,
-        emb_dim=hg_model.config.embd,
-        d_model=hg_model.config.embd,
-        num_heads=hg_model.config.n_head,
-        max_seq_length=hg_model.config.n_ctx,
-    )
-
-    ## [INPUT EMBEDDING]
-    ## copy embeddings from huggingface to my gpt2
-    my_model.wte.load_state_dict(hg_model.transformer.wte.state_dict())
-    my_model.wpe.load_state_dict(hg_model.transformer.wpe.state_dict())
-
-    ## [OUTPUT EMBEDDING]
-    ## copy to output vocab
-    my_model.head.load_state_dict(hg_model.lm_head.state_dict())
-
-    ## [TRANSFORMER BLOCK]
-    ## transforemr block copy
-    my_model = cp_gpt2_transformer_block_weights(hg_model, my_model)
-    
-    hg_model.eval()
-    my_model.eval()
-
-    with torch.no_grad():
-        hg_outputs = hg_model(
-            input_ids = inputs.input_ids,
-            attention_mask = inputs.attention_mask
-        )
-        my_output = my_model(
-            input_ids = inputs.input_ids,
-            # attention mask = inputs.attention_mask # <- we don't need padding mask for GPT1, GPT2
-        )
-        assert torch.all(torch.eq(hg_outputs.logits, my_output)), "Not same result!"
-        print("SAME RESULT! -- Huggingface-GPT2 and My Code")
-    
-    if __name__ =="__main__":
-        cli_main()
+        return tar
