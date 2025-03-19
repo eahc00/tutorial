@@ -1,7 +1,9 @@
 import pytorch_lightning as pl
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW
 from tutorial.gpt2.gpt2_model import GPT2
+from tutorial.gpt2.utils import generate
 
+import torch
 from torch import nn
 import evaluate
 import bert_score
@@ -14,13 +16,15 @@ class Model(pl.LightningModule):
         self.save_hyperparameters()
 
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-        self.tokenizer.add_special_tokens({"sep_token": "[SEP]", "pad_token": "[PAD]"})
+        self.tokenizer.add_special_tokens(
+            {"sep_token": "[SEP]", "pad_token": "[PAD]", "bos_token": "|beginoftext|"}
+        )
         self.hg_model = GPT2LMHeadModel.from_pretrained(model_name)
         self.hg_model.resize_token_embeddings(len(self.tokenizer))
 
         self.lr = lr
         self.model = GPT2(
-            vocab_size=self.hg_model.config.vocab_size + 2,
+            vocab_size=len(self.tokenizer),
             num_layers=self.hg_model.config.n_layer,
             emb_dim=self.hg_model.config.n_embd,
             d_model=self.hg_model.config.n_embd,
@@ -31,7 +35,9 @@ class Model(pl.LightningModule):
             self.hg_model, self.model
         )
 
-        self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100)  # ignore_index 추가
+        self.model = self.hg_model
+
+        self.loss_fct = nn.CrossEntropyLoss()
 
         self.bleu_scorer = evaluate.load("bleu")
         self.rougeL_scorer = evaluate.load("rouge")
@@ -42,16 +48,19 @@ class Model(pl.LightningModule):
 
     def forward(self, input_ids, labels=None):
         logits = self.model(input_ids=input_ids)
-        loss = self.compute_loss(logits, labels) if labels is not None else None
+        loss = (
+            self.loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+            if labels != None
+            else None
+        )
         return {"logits": logits, "loss": loss}
 
     def training_step(self, batch, batch_idx):
         inputs = batch["input_ids"]  # [B, 512]
-        labels = batch["labels"]  # [B, 512]
+        labels = batch["label_ids"]  # [B, 512]
 
         outputs = self(inputs, labels=labels)
         # print(outputs["logits"].size()) # [B, 512, vocab_size]
-
         # print(outputs["logits"].argmax(dim=-1).size())  # [B, 512]
 
         loss = outputs["loss"]
@@ -62,7 +71,7 @@ class Model(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         inputs = batch["input_ids"]
-        labels = batch["labels"]
+        labels = batch["label_ids"]
 
         outputs = self(inputs, labels=labels)
         loss = outputs["loss"]
@@ -70,18 +79,16 @@ class Model(pl.LightningModule):
         predicted_tokens = outputs["logits"].argmax(dim=-1)  # [B, 512]
 
         pred = self.tokenizer.decode(
-            [
-                token
-                for token in predicted_tokens[0].tolist()
-                if token != self.tokenizer.pad_token_id
-            ],
+            [token for token in predicted_tokens[0].tolist()],
             skip_special_tokens=True,
         )
 
         target = self.tokenizer.decode(
-            [token for token in labels[0].tolist() if token != -100],
+            [token for token in labels[0].tolist()],
             skip_special_tokens=True,
         )
+
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
 
         if self.valid_preds is None and self.valid_targets is None:
             self.valid_preds = [pred]
@@ -93,49 +100,36 @@ class Model(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        logging_dict = self.compute_metrics(
-            self.valid_preds, self.valid_targets, mode="val"
-        )
-        self.log_dict(logging_dict, on_epoch=True, prog_bar=True)
         self.valid_preds, self.valid_targets = None, None
 
     def test_step(self, batch, batch_idx):
         inputs = batch["input_ids"]
-        labels = batch["labels"]
+        labels = batch["label_ids"]
 
         outputs = self(inputs, labels=labels)
         loss = outputs["loss"]
 
         predicted_tokens = outputs["logits"].argmax(dim=-1)  # [B, 512] (배치 크기: B)
 
-        # 각 문장을 개별적으로 리스트에 저장
-        preds = [
-            self.tokenizer.decode(
-                [
-                    token
-                    for token in predicted_tokens[i].tolist()
-                    if token != self.tokenizer.pad_token_id
-                ],
-                skip_special_tokens=True,
-            )
-            for i in range(predicted_tokens.shape[0])  # 배치 내 모든 샘플 처리
-        ]
+        predicted_sentence = generate(self.model, self.tokenizer, inputs)
+        # print(len(predicted_sentence))
+        # print(predicted_sentence)
 
-        targets = [
-            self.tokenizer.decode(
-                [token for token in labels[i].tolist() if token != -100],
-                skip_special_tokens=True,
-            )
-            for i in range(labels.shape[0])  # 배치 내 모든 샘플 처리
-        ]
+        sep_token_id = self.tokenizer.convert_tokens_to_ids("[SEP]")
 
-        # 리스트에 추가
-        if self.test_preds is None and self.test_targets is None:
-            self.test_preds = preds
-            self.test_targets = targets
+        sep_idx = (labels == sep_token_id).nonzero(as_tuple=True)[0][0].item()
+        target_text_ids = labels[:, sep_idx + 1 :]
+
+        target_text = self.tokenizer.batch_decode(
+            target_text_ids, skip_special_tokens=True
+        )
+
+        if self.test_preds == None and self.test_targets == None:
+            self.test_targets = target_text
+            self.test_preds = predicted_sentence
         else:
-            self.test_preds.extend(preds)  # 리스트 확장 (배치 → 개별 샘플)
-            self.test_targets.extend(targets)
+            self.test_targets.extend(target_text)
+            self.test_preds.extend(predicted_sentence)
 
         return loss
 
@@ -159,60 +153,32 @@ class Model(pl.LightningModule):
     def configure_optimizers(self):
         return AdamW(self.model.parameters(), lr=self.lr)
 
-    """shift 시켜야 다음 라벨 예측으로 동작하는 거 아닌가?? 왜 이 코드로는 학습이 제대로 안되고 밑에 그냥 logits 갖다 쓰면 학습이 되는지??"""
-    # def compute_loss(self, logits, labels):
-    #     shift_logits = logits[:, :-1, :].contiguous()
-    #     shift_labels = labels[:, 1:].contiguous()
-
-    #     loss = self.loss_fct(
-    #         shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-    #     )
-    #     return loss
-
-    def compute_loss(self, logits, labels):
-        logits = logits.contiguous()
-
-        loss = self.loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
-
-        return loss
-
     def compute_metrics(self, preds, targets, mode):
-        bleu1_list, bleu2_list, bleu3_list, bleu4_list = [], [], [], []
-        rouge_list, bert_list = [], []
+        references_bleu = [[t] for t in targets]
+        bleu1_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=1
+        )["bleu"]
+        bleu2_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=2
+        )["bleu"]
+        bleu3_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=3
+        )["bleu"]
+        bleu4_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=4
+        )["bleu"]
 
-        for pred, target in zip(preds, targets):
-            bleu1_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=1
-            )["bleu"]
-            bleu2_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=2
-            )["bleu"]
-            bleu3_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=3
-            )["bleu"]
-            bleu4_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=4
-            )["bleu"]
+        rouge_result = self.rougeL_scorer.compute(
+            predictions=preds, references=targets
+        )["rougeL"]
 
-            rouge_result = self.rougeL_scorer.compute(
-                predictions=[pred], references=[target]
-            )["rougeL"]
-
-            _, _, bertscore_result = self.bert_scorer.score([pred], [target])
-
-            bleu1_list.append(bleu1_result)
-            bleu2_list.append(bleu2_result)
-            bleu3_list.append(bleu3_result)
-            bleu4_list.append(bleu4_result)
-            rouge_list.append(rouge_result)
-            bert_list.append(bertscore_result.mean().item())
+        _, _, bertscore_result = self.bert_scorer.score(preds, targets)
 
         return {
-            f"{mode}_bleu1_score": sum(bleu1_list) / len(bleu1_list),
-            f"{mode}_bleu2_score": sum(bleu2_list) / len(bleu2_list),
-            f"{mode}_bleu3_score": sum(bleu3_list) / len(bleu3_list),
-            f"{mode}_bleu4_score": sum(bleu4_list) / len(bleu4_list),
-            f"{mode}_rouge_score": sum(rouge_list) / len(rouge_list),
-            f"{mode}_bert_score": sum(bert_list) / len(bert_list),
+            f"{mode}_bleu1_score": bleu1_result,
+            f"{mode}_bleu2_score": bleu2_result,
+            f"{mode}_bleu3_score": bleu3_result,
+            f"{mode}_bleu4_score": bleu4_result,
+            f"{mode}_rouge_score": rouge_result,
+            f"{mode}_bert_score": bertscore_result.mean().item(),
         }
-

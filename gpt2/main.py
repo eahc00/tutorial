@@ -17,9 +17,7 @@ pl.seed_everything(seed)
 dataloader = STSBDataloader(model_name, batch_size, max_length)
 dataloader.setup()
 
-earlystopping_callback = EarlyStopping(
-    monitor="val_rouge_score", patience=2, mode="max"
-)
+earlystopping_callback = EarlyStopping(monitor="val_loss", patience=3)
 
 model = Model(model_name, lr=learning_rate)
 
