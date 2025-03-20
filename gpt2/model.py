@@ -1,6 +1,7 @@
 import pytorch_lightning as pl
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW
 from tutorial.gpt2.gpt2_model import GPT2
+from tutorial.gpt2.utils import generate
 
 from torch import nn
 import evaluate
@@ -9,18 +10,17 @@ import pandas as pd
 
 
 class Model(pl.LightningModule):
-    def __init__(self, model_name, lr: float = 1e-5):
+    def __init__(self, model_name, tokenizer, lr: float = 1e-5):
         super().__init__()
         self.save_hyperparameters()
 
-        self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-        self.tokenizer.add_special_tokens({"sep_token": "[SEP]", "pad_token": "[PAD]"})
+        self.tokenizer = tokenizer
         self.hg_model = GPT2LMHeadModel.from_pretrained(model_name)
         self.hg_model.resize_token_embeddings(len(self.tokenizer))
 
         self.lr = lr
         self.model = GPT2(
-            vocab_size=self.hg_model.config.vocab_size + 2,
+            vocab_size=len(self.tokenizer),
             num_layers=self.hg_model.config.n_layer,
             emb_dim=self.hg_model.config.n_embd,
             d_model=self.hg_model.config.n_embd,
@@ -35,23 +35,27 @@ class Model(pl.LightningModule):
 
         self.bleu_scorer = evaluate.load("bleu")
         self.rougeL_scorer = evaluate.load("rouge")
-        self.bert_scorer = bert_score.BERTScorer(lang="en", rescale_with_baseline=False)
+        self.bert_scorer = bert_score.BERTScorer(
+            lang="en", rescale_with_baseline=False, device="cuda:3"
+        )
 
-        self.valid_preds, self.valid_targets = None, None
         self.test_preds, self.test_targets = None, None
 
     def forward(self, input_ids, labels=None):
         logits = self.model(input_ids=input_ids)
-        loss = self.compute_loss(logits, labels) if labels is not None else None
+        loss = (
+            self.loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+            if labels != None
+            else None
+        )
         return {"logits": logits, "loss": loss}
 
     def training_step(self, batch, batch_idx):
         inputs = batch["input_ids"]  # [B, 512]
-        labels = batch["labels"]  # [B, 512]
+        labels = batch["label_ids"]  # [B, 512]
 
         outputs = self(inputs, labels=labels)
         # print(outputs["logits"].size()) # [B, 512, vocab_size]
-
         # print(outputs["logits"].argmax(dim=-1).size())  # [B, 512]
 
         loss = outputs["loss"]
@@ -62,80 +66,59 @@ class Model(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         inputs = batch["input_ids"]
-        labels = batch["labels"]
+        labels = batch["label_ids"]
 
         outputs = self(inputs, labels=labels)
         loss = outputs["loss"]
 
-        predicted_tokens = outputs["logits"].argmax(dim=-1)  # [B, 512]
-
-        pred = self.tokenizer.decode(
-            [
-                token
-                for token in predicted_tokens[0].tolist()
-                if token != self.tokenizer.pad_token_id
-            ],
-            skip_special_tokens=True,
-        )
-
-        target = self.tokenizer.decode(
-            [token for token in labels[0].tolist() if token != -100],
-            skip_special_tokens=True,
-        )
-
-        if self.valid_preds is None and self.valid_targets is None:
-            self.valid_preds = [pred]
-            self.valid_targets = [target]
-        else:
-            self.valid_preds.append(pred)
-            self.valid_targets.append(target)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
 
         return loss
 
-    def on_validation_epoch_end(self):
-        logging_dict = self.compute_metrics(
-            self.valid_preds, self.valid_targets, mode="val"
-        )
-        self.log_dict(logging_dict, on_epoch=True, prog_bar=True)
-        self.valid_preds, self.valid_targets = None, None
-
     def test_step(self, batch, batch_idx):
-        inputs = batch["input_ids"]
-        labels = batch["labels"]
+        input_ids = batch["input_ids"]  # shape: (B, seq_len)
+        labels = batch["label_ids"]  # shape: (B, seq_len)
 
-        outputs = self(inputs, labels=labels)
+        outputs = self(input_ids, labels=labels)
         loss = outputs["loss"]
 
-        predicted_tokens = outputs["logits"].argmax(dim=-1)  # [B, 512] (배치 크기: B)
+        # 배치 내 모든 샘플 별로 sep_idx 찾고, 각자 생성
+        all_preds = []
+        all_targets = []
 
-        # 각 문장을 개별적으로 리스트에 저장
-        preds = [
-            self.tokenizer.decode(
-                [
-                    token
-                    for token in predicted_tokens[i].tolist()
-                    if token != self.tokenizer.pad_token_id
-                ],
+        for i in range(input_ids.size(0)):  # B
+            single_input = input_ids[i].unsqueeze(0)  # shape: (1, seq_len)
+            single_label = labels[i].unsqueeze(0)  # shape: (1, seq_len)
+
+            sep_positions = (
+                single_input == self.tokenizer.convert_tokens_to_ids("<sep>")
+            ).nonzero(as_tuple=True)
+
+            sep_idx = sep_positions[1].item()  # 첫 번째 [SEP] 위치
+
+            generated_sentence = generate(
+                self.model,
+                self.tokenizer,
+                single_input[:, : sep_idx + 1],
+                sep_idx,
+            )
+            # print(generated_sentence)
+
+            target_text_ids = single_label[:, sep_idx + 1 :]
+            target_text = self.tokenizer.batch_decode(
+                [[id for id in seq if id != -100] for seq in target_text_ids],
                 skip_special_tokens=True,
             )
-            for i in range(predicted_tokens.shape[0])  # 배치 내 모든 샘플 처리
-        ]
 
-        targets = [
-            self.tokenizer.decode(
-                [token for token in labels[i].tolist() if token != -100],
-                skip_special_tokens=True,
-            )
-            for i in range(labels.shape[0])  # 배치 내 모든 샘플 처리
-        ]
+            all_preds.extend(generated_sentence)
+            all_targets.extend(target_text)
 
-        # 리스트에 추가
-        if self.test_preds is None and self.test_targets is None:
-            self.test_preds = preds
-            self.test_targets = targets
+        if self.test_preds is None:
+            self.test_preds = all_preds
+            self.test_targets = all_targets
         else:
-            self.test_preds.extend(preds)  # 리스트 확장 (배치 → 개별 샘플)
-            self.test_targets.extend(targets)
+            self.test_preds.extend(all_preds)
+            self.test_targets.extend(all_targets)
 
         return loss
 
@@ -159,60 +142,32 @@ class Model(pl.LightningModule):
     def configure_optimizers(self):
         return AdamW(self.model.parameters(), lr=self.lr)
 
-    """shift 시켜야 다음 라벨 예측으로 동작하는 거 아닌가?? 왜 이 코드로는 학습이 제대로 안되고 밑에 그냥 logits 갖다 쓰면 학습이 되는지??"""
-    # def compute_loss(self, logits, labels):
-    #     shift_logits = logits[:, :-1, :].contiguous()
-    #     shift_labels = labels[:, 1:].contiguous()
-
-    #     loss = self.loss_fct(
-    #         shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-    #     )
-    #     return loss
-
-    def compute_loss(self, logits, labels):
-        logits = logits.contiguous()
-
-        loss = self.loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
-
-        return loss
-
     def compute_metrics(self, preds, targets, mode):
-        bleu1_list, bleu2_list, bleu3_list, bleu4_list = [], [], [], []
-        rouge_list, bert_list = [], []
+        references_bleu = [[t] for t in targets]
+        bleu1_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=1
+        )["bleu"]
+        bleu2_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=2
+        )["bleu"]
+        bleu3_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=3
+        )["bleu"]
+        bleu4_result = self.bleu_scorer.compute(
+            predictions=preds, references=references_bleu, max_order=4
+        )["bleu"]
 
-        for pred, target in zip(preds, targets):
-            bleu1_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=1
-            )["bleu"]
-            bleu2_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=2
-            )["bleu"]
-            bleu3_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=3
-            )["bleu"]
-            bleu4_result = self.bleu_scorer.compute(
-                predictions=[pred], references=[[target]], max_order=4
-            )["bleu"]
+        rouge_result = self.rougeL_scorer.compute(
+            predictions=preds, references=targets
+        )["rougeL"]
 
-            rouge_result = self.rougeL_scorer.compute(
-                predictions=[pred], references=[target]
-            )["rougeL"]
-
-            _, _, bertscore_result = self.bert_scorer.score([pred], [target])
-
-            bleu1_list.append(bleu1_result)
-            bleu2_list.append(bleu2_result)
-            bleu3_list.append(bleu3_result)
-            bleu4_list.append(bleu4_result)
-            rouge_list.append(rouge_result)
-            bert_list.append(bertscore_result.mean().item())
+        _, _, bertscore_result = self.bert_scorer.score(preds, targets)
 
         return {
-            f"{mode}_bleu1_score": sum(bleu1_list) / len(bleu1_list),
-            f"{mode}_bleu2_score": sum(bleu2_list) / len(bleu2_list),
-            f"{mode}_bleu3_score": sum(bleu3_list) / len(bleu3_list),
-            f"{mode}_bleu4_score": sum(bleu4_list) / len(bleu4_list),
-            f"{mode}_rouge_score": sum(rouge_list) / len(rouge_list),
-            f"{mode}_bert_score": sum(bert_list) / len(bert_list),
+            f"{mode}_bleu1_score": bleu1_result,
+            f"{mode}_bleu2_score": bleu2_result,
+            f"{mode}_bleu3_score": bleu3_result,
+            f"{mode}_bleu4_score": bleu4_result,
+            f"{mode}_rouge_score": rouge_result,
+            f"{mode}_bert_score": bertscore_result.mean().item(),
         }
-
