@@ -54,7 +54,7 @@ class GPT2MLP_linear_version(nn.Module):
     # CONV1D equivalent Linear implementation
     # but, you cannot import huggingface weigths to this module.
     def __init__(self, d_model, dim_feedforward=2048, dropout=0.1):
-        super(GPT2MLP, self).__init__()
+        super(GPT2MLP_linear_version, self).__init__()
         self.feedforward_1 = nn.Linear(d_model, dim_feedforward)
         self.act_function = nn.GELU()
         self.feedforward_2 = nn.Linear(dim_feedforward, d_model)
@@ -164,8 +164,8 @@ class GPT2Decoder(nn.Module):
         layers_attn_scores = []
         "Pass the input(and mask) through each layer in turn."
         for layer in self.layers:
-            x, attn_scroes = layer(x, look_ahead_mask)
-            layers_attn_scores.append(attn_scroes)
+            x, attn_scores = layer(x, look_ahead_mask)
+            layers_attn_scores.append(attn_scores)
 
         return x, layers_attn_scores
 

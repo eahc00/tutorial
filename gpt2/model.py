@@ -15,7 +15,9 @@ class Model(pl.LightningModule):
         self.save_hyperparameters()
 
         self.tokenizer = tokenizer
-        self.hg_model = GPT2LMHeadModel.from_pretrained(model_name)
+        self.hg_model = GPT2LMHeadModel.from_pretrained(
+            model_name, cache_dir="/home/eahc00/.cache/huggingface/transformers"
+        )
         self.hg_model.resize_token_embeddings(len(self.tokenizer))
 
         self.lr = lr
@@ -42,10 +44,15 @@ class Model(pl.LightningModule):
         self.test_preds, self.test_targets = None, None
 
     def forward(self, input_ids, labels=None):
-        logits = self.model(input_ids=input_ids)
+        logits = self.model(input_ids=input_ids).contiguous()
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous() if labels is not None else None
+
         loss = (
-            self.loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
-            if labels != None
+            self.loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
+            if labels is not None
             else None
         )
         return {"logits": logits, "loss": loss}

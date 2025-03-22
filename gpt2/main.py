@@ -6,7 +6,7 @@ from tutorial.gpt2.dataset import STSBDataloader
 from tutorial.gpt2.model import Model
 
 max_length = 512
-learning_rate = 1e-5
+learning_rate = 5e-5
 max_epoch = 30
 batch_size = 16
 model_name = "gpt2"
@@ -15,7 +15,9 @@ gpu_id = [3]
 
 # pl.seed_everything(seed)
 
-tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+tokenizer = GPT2Tokenizer.from_pretrained(
+    model_name, cache_dir="/home/eahc00/.cache/huggingface/transformers"
+)
 tokenizer.add_special_tokens(
     {
         "sep_token": "<sep>",
@@ -40,6 +42,7 @@ trainer = pl.Trainer(
 )
 
 trainer.fit(model=model, datamodule=dataloader)
+
 
 model.eval()
 trainer.test(model=model, datamodule=dataloader)

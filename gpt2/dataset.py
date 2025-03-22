@@ -19,9 +19,11 @@ class STSBDataset(Dataset):
         sentence2 = self.item[idx]["sentence2"]
 
         inputs = self.tokenizer(
-            # self.tokenizer.bos_token
-            # + sentence1
-            sentence1 + self.tokenizer.sep_token + sentence2, # + self.tokenizer.eos_token,
+            self.tokenizer.bos_token
+            + sentence1
+            + self.tokenizer.sep_token
+            + sentence2
+            + self.tokenizer.eos_token,
             max_length=self.max_length,
             padding="max_length",
             truncation=True,
