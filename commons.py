@@ -313,6 +313,7 @@ class BERT_CONFIG:
         num_heads,
         att_prob_dropout,
         dim_feedforward,
+        pooled_output=True,
     ):
 
         # embedding
@@ -328,11 +329,14 @@ class BERT_CONFIG:
         self.num_heads = num_heads
         self.att_prob_dropout = att_prob_dropout
         self.dim_feedforward = dim_feedforward
+        self.pooled_output = pooled_output
 
 
 class BERT(nn.Module):
     def __init__(self, config):
         super().__init__()
+
+        self.config = config
 
         ## [Embeddings]
         self.embeddings = BertEmbeddings(
@@ -360,10 +364,11 @@ class BERT(nn.Module):
         attention_mask = attention_mask[:, None, None, :]  # [B, 1, 1, seq_len]
         seq_embs = self.embeddings(input_ids, token_type_ids)
         output = self.encoder(seq_embs, attention_mask)
-        pooled_out = self.pooler(output[0])
-
         layer_attention_scores = output[1]
-        return pooled_out, layer_attention_scores
+        if self.config.pooled_output:
+            pooled_out = self.pooler(output[0])
+            return pooled_out, layer_attention_scores
+        return output[0], layer_attention_scores
 
     def cp_encoder_block_weights_from_huggingface(self, src_encoder, tar_encoder):
         ## src: huggingface BERT model
@@ -410,7 +415,8 @@ class BERT(nn.Module):
 
     def copy_weights_from_huggingface(self, hg_bert):
         self.embeddings.load_state_dict(hg_bert.embeddings.state_dict())
-        self.pooler.load_state_dict(hg_bert.pooler.state_dict())
+        if self.config.pooled_output:
+            self.pooler.load_state_dict(hg_bert.pooler.state_dict())
 
         self.encoder = self.cp_encoder_block_weights_from_huggingface(
             src_encoder=hg_bert.encoder, tar_encoder=self.encoder
