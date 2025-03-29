@@ -213,5 +213,6 @@ lightning_logs
 practice2/md_data
 practice1/Korpora
 practice1/*.safetensors
+*.csv
 
 # End of https://www.toptal.com/developers/gitignore/api/linux,python,visualstudiocode
